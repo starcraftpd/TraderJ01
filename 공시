@@ -13,187 +13,235 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
-# 보안 및 경고 무시
 warnings.filterwarnings(action='ignore')
 ssl_verify = False
 API_KEY = '88334205f08b12dbc563a46758a3534a1778f471'
 DART_VIEW_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
 
-# 로컬 저장 파일
-EXCLUDE_FILE = "exclude_keywords.txt"
-INCLUDE_FILE = "include_keywords.txt"
+# [공시 분류 규칙]
+KEYWORD_TYPE_RULES = {
+    'A': ['사업보고서', '분기보고서', '반기보고서'],
+    'B': ['주요사항보고서', '유상증자결정', '무상증자결정', '합병', '영업양수'],
+    'C': ['증권신고서', '투자설명서', '채권발행', '사채발행', '발행공고'],
+    'D': ['주식등의대량보유상황보고서', '최대주주변경', '임원ㆍ주요주주특정증권'],
+    'I': ['안내공시', '거래소공시', '수시공시', '공정공시'],
+    'J': ['대규모내부거래', '기업집단현황']
+}
 
-PBLNTF_TY_MAP = {
-    'A': '정기공시', 'B': '주요사항보고', 'C': '발행공시', 'D': '지분공시',
-    'E': '기타공시', 'F': '외부감사관련', 'G': '펀드공시', 'H': '자산유동화',
-    'I': '거래소공시', 'J': '공정위공시'
+PBLNTF_CONFIG = {
+    'A': {'name': '정기공시', 'color': '#FFD1D1'}, 'B': {'name': '주요사항', 'color': '#D1E2FF'},
+    'C': {'name': '발행공시', 'color': '#D1FFD1'}, 'D': {'name': '지분공시', 'color': '#FFF3D1'},
+    'E': {'name': '기타공시', 'color': '#F3D1FF'}, 'F': {'name': '외부감사', 'color': '#EAEAEA'},
+    'G': {'name': '펀드공시', 'color': '#D1FFF3'}, 'H': {'name': '자산유동', 'color': '#FFE4D1'},
+    'I': {'name': '거래소',   'color': '#D1F5FF'}, 'J': {'name': '공정위',   'color': '#E2FFD1'}
 }
 
 class DartMonitorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("DART 실시간 모니터 v3.8 (시스템 안정화 버전)")
-        self.root.geometry("1200x850")
+        self.root.title("DART 실시간 모니터 v6.7 (공시 목록 실시간 검색)")
+        self.root.geometry("1450x920")
         
         self.processed_ids = set()
+        self.all_captured_data = [] # 모든 포착 데이터를 저장할 리스트 (필터링용)
         self.is_running = False
         self.update_queue = queue.Queue()
-        
-        self.exclude_keywords = self.load_keywords(EXCLUDE_FILE)
-        self.include_keywords = self.load_keywords(INCLUDE_FILE)
-        self.all_market_corps = self.get_all_market_corps()
+
+        self.exclude_keywords = self.load_data("exclude_keywords.txt")
+        self.include_keywords = self.load_data("include_keywords.txt")
+        self.saved_corps = self.load_data("my_corps.txt")
+        self.sorted_corp_names = [] 
+        self.corp_market_map = {} 
+        self.get_all_corp_data()
         
         self.setup_ui()
         self.process_queue()
 
-    def load_keywords(self, filename):
-        if os.path.exists(filename):
+    def load_data(self, f):
+        if os.path.exists(f):
             try:
-                with open(filename, 'r', encoding='utf-8') as f:
-                    return [line.strip() for line in f.readlines() if line.strip()]
+                with open(f, 'r', encoding='utf-8') as file: return [l.strip() for l in file.readlines() if l.strip()]
             except: return []
         return []
 
-    def save_keywords(self, filename, kws):
-        with open(filename, 'w', encoding='utf-8') as f:
-            for kw in kws: f.write(kw + "\n")
+    def save_data(self, f, d):
+        with open(f, 'w', encoding='utf-8') as file:
+            for item in d: file.write(item + "\n")
 
-    def get_all_market_corps(self):
+    def get_all_corp_data(self):
         try:
-            url = "https://opendart.fss.or.kr/api/corpCode.xml"
-            res = requests.get(url, params={'crtfc_key': API_KEY}, verify=ssl_verify)
+            res = requests.get("https://opendart.fss.or.kr/api/corpCode.xml", params={'crtfc_key': API_KEY}, verify=ssl_verify)
             with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-                xml_data = z.read('CORPCODE.xml')
-            tree = ET.fromstring(xml_data)
-            return {row.find('corp_name').text for row in tree.findall('list') if row.find('stock_code').text.strip()}
-        except: return set()
+                xml = z.read('CORPCODE.xml')
+            tree = ET.fromstring(xml)
+            for row in tree.findall('list'):
+                name = row.find('corp_name').text
+                if row.find('stock_code').text.strip(): 
+                    self.corp_market_map[name] = "Listed"
+            self.sorted_corp_names = sorted(list(self.corp_market_map.keys()))
+        except: pass
 
     def setup_ui(self):
-        # 상단 설정 바
-        top = tk.Frame(self.root, pady=10)
-        top.pack(fill="x")
-        tk.Label(top, text="조회 주기(초): ").pack(side="left", padx=5)
-        self.interval_entry = tk.Entry(top, width=5)
-        self.interval_entry.insert(0, "60")
-        self.interval_entry.pack(side="left", padx=5)
-        
+        # 상단 레이아웃
+        top = tk.Frame(self.root, pady=10, bg="#f3f3f3"); top.pack(fill="x")
+        ctrl_f = tk.Frame(top, bg="#f3f3f3"); ctrl_f.pack(side="left", padx=10)
+        tk.Label(ctrl_f, text="조회 날짜:", bg="#f3f3f3", font=('', 9, 'bold')).pack(side="left")
+        self.date_entry = tk.Entry(ctrl_f, width=10); self.date_entry.insert(0, datetime.now().strftime('%Y%m%d')); self.date_entry.pack(side="left", padx=5)
+        self.time_mode = tk.StringVar(value="now")
+        tk.Radiobutton(ctrl_f, text="실행 시점부터", variable=self.time_mode, value="now", bg="#f3f3f3").pack(side="left", padx=5)
+        tk.Radiobutton(ctrl_f, text="해당일 전체", variable=self.time_mode, value="today", bg="#f3f3f3").pack(side="left")
+        self.interval_entry = tk.Entry(ctrl_f, width=4); self.interval_entry.insert(0, "60"); self.interval_entry.pack(side="right", padx=5)
+        tk.Label(ctrl_f, text="주기(초):", bg="#f3f3f3").pack(side="right")
+
+        filter_f = tk.Frame(top, bg="#f3f3f3"); filter_f.pack(side="right", padx=10)
         self.monitor_mode = tk.StringVar(value="all")
-        tk.Radiobutton(top, text="전체 상장사", variable=self.monitor_mode, value="all").pack(side="left", padx=10)
-        tk.Radiobutton(top, text="관심 종목", variable=self.monitor_mode, value="selected").pack(side="left", padx=10)
+        for t, v in [("전체", "all"), ("코스피", "KOSPI"), ("코스닥", "KOSDAQ"), ("관심종목", "selected")]:
+            tk.Radiobutton(filter_f, text=t, variable=self.monitor_mode, value=v, bg="#f3f3f3").pack(side="left", padx=5)
 
-        # 메인 레이아웃 (3분할)
-        paned = tk.PanedWindow(self.root, orient="horizontal")
-        paned.pack(fill="both", expand=True, padx=10, pady=5)
+        paned = tk.PanedWindow(self.root, orient="horizontal"); paned.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # --- 왼쪽 패널: 종목 설정 ---
+        left_panel = tk.Frame(paned); paned.add(left_panel, width=320)
+        search_outer = tk.LabelFrame(left_panel, text="종목 검색 및 선택")
+        search_outer.pack(fill="x", pady=(0,5))
+        self.search_var = tk.StringVar(); self.search_var.trace("w", self.update_check_list)
+        tk.Entry(search_outer, textvariable=self.search_var).pack(fill="x", padx=5, pady=5)
+        self.c_canvas = tk.Canvas(search_outer, height=280, highlightthickness=0)
+        c_scroll = ttk.Scrollbar(search_outer, orient="vertical", command=self.c_canvas.yview)
+        self.check_list_frame = tk.Frame(self.c_canvas)
+        self.c_canvas.create_window((0, 0), window=self.check_list_frame, anchor="nw")
+        self.c_canvas.configure(yscrollcommand=c_scroll.set); c_scroll.pack(side="right", fill="y"); self.c_canvas.pack(side="left", fill="both", expand=True)
+        self.check_list_frame.bind("<Configure>", lambda e: self.c_canvas.configure(scrollregion=self.c_canvas.bbox("all")))
 
-        # 1. 좌측: 관심 종목
-        left = tk.LabelFrame(paned, text="관심 종목 (체크)")
-        paned.add(left, width=150)
-        self.corp_vars = {}
-        for c in ['삼성전자', 'SK하이닉스', '현대차', 'NAVER', '카카오']:
-            v = tk.BooleanVar()
-            tk.Checkbutton(left, text=c, variable=v).pack(anchor="w")
-            self.corp_vars[c] = v
+        saved_group = tk.LabelFrame(left_panel, text="나의 관심 종목 (스크롤)", fg="#2980b9")
+        saved_group.pack(fill="both", expand=True)
+        s_canvas = tk.Canvas(saved_group, highlightthickness=0); s_scroll = ttk.Scrollbar(saved_group, orient="vertical", command=s_canvas.yview)
+        self.saved_list_frame = tk.Frame(s_canvas)
+        s_canvas.create_window((0, 0), window=self.saved_list_frame, anchor="nw")
+        s_canvas.configure(yscrollcommand=s_scroll.set); s_scroll.pack(side="right", fill="y"); s_canvas.pack(side="left", fill="both", expand=True)
+        self.saved_list_frame.bind("<Configure>", lambda e: s_canvas.configure(scrollregion=s_canvas.bbox("all")))
+        self.saved_widgets = {}
+        self.update_check_list()
+        for name in self.saved_corps: self.create_saved_widget(name)
 
-        # 2. 중앙: 공시 메인 리스트
-        center = tk.LabelFrame(paned, text="포착된 공시 목록 (더블클릭 시 상세 페이지 열기)")
-        paned.add(center, width=650)
-        self.tree = ttk.Treeview(center, columns=("t","y","c","r"), show='headings')
-        for col, head in zip(("t","y","c","r"), ("시간","유형","종목","공시제목")):
+        # --- 중앙: 공시 리스트 및 리스트 검색 기능 ---
+        center = tk.LabelFrame(paned, text="공시 포착 현황")
+        paned.add(center, width=820)
+        
+        # [신규] 공시 리스트 내 종목 검색창
+        list_search_f = tk.Frame(center, pady=5)
+        list_search_f.pack(fill="x")
+        tk.Label(list_search_f, text=" 결과 내 종목 검색:", font=('', 9, 'bold')).pack(side="left", padx=5)
+        self.list_filter_var = tk.StringVar()
+        self.list_filter_var.trace("w", self.apply_list_filter)
+        self.list_filter_ent = tk.Entry(list_search_f, textvariable=self.list_filter_var)
+        self.list_filter_ent.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        self.tree = ttk.Treeview(center, columns=("no","lt","y","c","r"), show='headings')
+        for col, head in zip(("no","lt","y","c","r"), ("번호","시각","유형","종목명","공시 제목")):
             self.tree.heading(col, text=head)
-        self.tree.column("t", width=70, anchor="center")
-        self.tree.column("y", width=90, anchor="center")
-        self.tree.column("c", width=120)
-        self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<Double-1>", self.open_link)
+        for c, w in zip(("no","lt","y","c","r"), (70, 80, 80, 130, 450)): self.tree.column(c, width=w, anchor="center" if c!="r" and c!="c" else "w")
+        self.tree.pack(fill="both", expand=True); self.tree.bind("<Double-1>", self.on_double_click)
+        for code, info in PBLNTF_CONFIG.items(): self.tree.tag_configure(f"TAG_{code}", background=info['color'])
 
-        # 3. 우측: 키워드 관리 및 실시간 상태 로그
-        right_frame = tk.Frame(paned)
-        paned.add(right_frame, width=300)
+        # 오른쪽: 키워드 필터
+        right = tk.Frame(paned); paned.add(right, width=300)
+        for title, key_list, color, attr in [("[포함] 키워드", self.include_keywords, "blue", "inc"), ("[제외] 키워드", self.exclude_keywords, "red", "exc")]:
+            f = tk.LabelFrame(right, text=title, fg=color); f.pack(fill="x", pady=5, padx=5)
+            t = tk.Frame(f); t.pack(fill="x", padx=5, pady=2)
+            ent = tk.Entry(t); ent.pack(side="left", fill="x", expand=True); setattr(self, f"{attr}_ent", ent)
+            tk.Button(t, text="+", command=lambda a=attr: self.add_keyword(a)).pack(side="right", padx=2)
+            lb_frame = tk.Frame(f); lb_frame.pack(fill="x", padx=5, pady=5)
+            lb = tk.Listbox(lb_frame, height=8); lb.pack(side="left", fill="x", expand=True)
+            scr = ttk.Scrollbar(lb_frame, orient="vertical", command=lb.yview)
+            lb.configure(yscrollcommand=scr.set); scr.pack(side="right", fill="y")
+            setattr(self, f"{attr}_lb", lb); lb.bind("<Delete>", lambda e, a=attr: self.del_keyword(a))
+            ent.bind("<Return>", lambda e, a=attr: self.add_keyword(a))
+            for k in key_list: lb.insert(tk.END, k)
 
-        # 키워드 UI
-        kf = tk.LabelFrame(right_frame, text="키워드 필터")
-        kf.pack(fill="x", pady=2)
+        bottom_f = tk.Frame(self.root, padx=10, pady=5); bottom_f.pack(fill="x")
+        self.btn_txt = tk.StringVar(value="모니터링 시작"); self.start_btn = tk.Button(bottom_f, textvariable=self.btn_txt, command=self.toggle, bg="#2ecc71", fg="white", font=('',12,'bold'), height=2)
+        self.start_btn.pack(side="left", fill="x", expand=True, padx=(0,5))
+        tk.Button(bottom_f, text="리스트 초기화", command=self.full_reset, bg="#95a5a6", fg="white", height=2).pack(side="right")
+
+    # --- [신규] 리스트 필터링 로직 ---
+    def apply_list_filter(self, *args):
+        query = self.list_filter_var.get().strip().lower()
+        # 트리 뷰 비우기
+        for i in self.tree.get_children(): self.tree.delete(i)
         
-        tk.Label(kf, text="[포함] (비워두면 전체)").pack(anchor="w", padx=5)
-        self.inc_ent = tk.Entry(kf); self.inc_ent.pack(fill="x", padx=5); self.inc_ent.bind("<Return>", self.add_inc)
-        self.inc_lb = tk.Listbox(kf, height=5); self.inc_lb.pack(fill="x", padx=5); self.inc_lb.bind("<Delete>", self.del_inc)
-        
-        tk.Label(kf, text="[제외]").pack(anchor="w", padx=5, pady=(5,0))
-        self.exc_ent = tk.Entry(kf); self.exc_ent.pack(fill="x", padx=5); self.exc_ent.bind("<Return>", self.add_exc)
-        self.exc_lb = tk.Listbox(kf, height=5); self.exc_lb.pack(fill="x", padx=5); self.exc_lb.bind("<Delete>", self.del_exc)
-        
-        for k in self.include_keywords: self.inc_lb.insert(tk.END, k)
-        for k in self.exclude_keywords: self.exc_lb.insert(tk.END, k)
+        # 저장된 전체 데이터에서 필터링하여 다시 삽입
+        for d in self.all_captured_data:
+            if not query or query in d['c'].lower():
+                self.tree.insert("", 0, values=(d['no'], d['lt'], d['y'], d['c'], d['r']), tags=(d['u'], d['t']))
 
-        # 하단 로그 메시지창 (알림 대용)
-        self.log_text = tk.Text(right_frame, bg="#f0f0f0", font=("맑은 고딕", 9), state="disabled")
-        self.log_text.pack(fill="both", expand=True, pady=5)
+    def update_check_list(self, *args):
+        search_term = self.search_var.get().strip().lower()
+        for child in self.check_list_frame.winfo_children(): child.destroy()
+        display_list = self.sorted_corp_names[:20] if not search_term else [n for n in self.sorted_corp_names if search_term in n.lower()][:100]
+        if not search_term: tk.Label(self.check_list_frame, text="[가나다순 상위 20개]", fg="gray", font=("", 8)).pack(anchor="w", padx=10)
+        for name in display_list:
+            var = tk.BooleanVar(value=name in self.saved_corps)
+            cb = tk.Checkbutton(self.check_list_frame, text=name, variable=var, command=lambda n=name, v=var: self.on_corp_check(n, v), anchor="w", padx=10)
+            cb.pack(fill="x", expand=True)
 
-        # 시작/중지 버튼
-        self.btn_txt = tk.StringVar(value="모니터링 시작")
-        self.start_btn = tk.Button(self.root, textvariable=self.btn_txt, command=self.toggle, bg="#2ecc71", fg="white", font=('',12,'bold'), height=2)
-        self.start_btn.pack(fill="x", padx=10, pady=5)
-        self.status = tk.Label(self.root, text="상태: 대기 중", fg="gray")
-        self.status.pack()
+    def on_corp_check(self, name, var):
+        if var.get():
+            if name not in self.saved_corps: self.saved_corps.append(name); self.create_saved_widget(name)
+        else: self.remove_saved(name)
+        self.save_data("my_corps.txt", self.saved_corps)
 
-    def add_log(self, msg):
-        self.log_text.config(state="normal")
-        self.log_text.insert("1.0", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-        self.log_text.config(state="disabled")
+    def create_saved_widget(self, name):
+        if name in self.saved_widgets: return
+        f = tk.Frame(self.saved_list_frame, bg="white", pady=1); f.pack(fill="x", anchor="w", padx=2, pady=1)
+        tk.Label(f, text=f" {name}", anchor="w", bg="white").pack(side="left", fill="x", expand=True)
+        tk.Button(f, text="삭제", command=lambda n=name: self.remove_saved(n), relief="flat", fg="#c0392b", bg="white", font=("", 8)).pack(side="right", padx=5)
+        self.saved_widgets[name] = f
 
-    def open_link(self, e):
-        sel = self.tree.selection()
-        if sel: webbrowser.open(self.tree.item(sel[0], "tags")[0])
-
-    def add_inc(self, e):
-        k = self.inc_ent.get().strip()
-        if k and k not in self.include_keywords:
-            self.include_keywords.append(k); self.inc_lb.insert(tk.END, k)
-            self.save_keywords(INCLUDE_FILE, self.include_keywords); self.inc_ent.delete(0, tk.END)
-
-    def del_inc(self, e):
-        s = self.inc_lb.curselection()
-        if s:
-            k = self.inc_lb.get(s[0]); self.include_keywords.remove(k)
-            self.inc_lb.delete(s[0]); self.save_keywords(INCLUDE_FILE, self.include_keywords)
-
-    def add_exc(self, e):
-        k = self.exc_ent.get().strip()
-        if k and k not in self.exclude_keywords:
-            self.exclude_keywords.append(k); self.exc_lb.insert(tk.END, k)
-            self.save_keywords(EXCLUDE_FILE, self.exclude_keywords); self.exc_ent.delete(0, tk.END)
-
-    def del_exc(self, e):
-        s = self.exc_lb.curselection()
-        if s:
-            k = self.exc_lb.get(s[0]); self.exclude_keywords.remove(k)
-            self.exc_lb.delete(s[0]); self.save_keywords(EXCLUDE_FILE, self.exclude_keywords)
-
-    def process_queue(self):
-        """메인 스레드 전용 UI 업데이트 (에러 방지)"""
-        try:
-            while not self.update_queue.empty():
-                d = self.update_queue.get_nowait()
-                self.tree.insert("", 0, values=(d['t'], d['y'], d['c'], d['r']), tags=(d['u'],))
-                self.add_log(f"포착: {d['c']} - {d['r'][:15]}...")
-        except: pass
-        self.root.after(500, self.process_queue)
+    def remove_saved(self, name):
+        if name in self.saved_corps: self.saved_corps.remove(name)
+        if name in self.saved_widgets: self.saved_widgets[name].destroy(); del self.saved_widgets[name]
+        self.save_data("my_corps.txt", self.saved_corps)
+        self.update_check_list()
 
     def toggle(self):
         if not self.is_running:
-            self.start_time = datetime.now().strftime('%Y%m%d%H%M%S')
-            self.is_running = True
-            self.btn_txt.set("모니터링 중지")
-            self.start_btn.config(bg="#e74c3c")
-            self.status.config(text="조회 실행 중...", fg="blue")
+            self.processed_ids.clear(); self.is_running = True; self.btn_txt.set("중지(Stop)"); self.start_btn.config(bg="#e74c3c")
             threading.Thread(target=self.run_loop, daemon=True).start()
-        else:
-            self.is_running = False
-            self.btn_txt.set("모니터링 시작")
-            self.start_btn.config(bg="#2ecc71")
-            self.status.config(text="중지됨", fg="red")
+        else: self.is_running = False; self.btn_txt.set("모니터링 시작"); self.start_btn.config(bg="#2ecc71")
+
+    def check_dart(self):
+        target_date = self.date_entry.get().strip()
+        params = {'crtfc_key': API_KEY, 'bgn_de': target_date, 'page_count': '100', 'sort_mth': 'desc'}
+        try:
+            res = requests.get("https://opendart.fss.or.kr/api/list.json", params=params, verify=ssl_verify).json()
+            if res.get('status') == '000':
+                items = res.get('list', []); items.reverse()
+                for item in items:
+                    rid = item['rcept_no']
+                    if rid in self.processed_ids: continue
+                    title = item['report_nm']
+                    if any(x in title for x in self.exclude_keywords): continue
+                    if self.include_keywords and not any(x in title for x in self.include_keywords): continue
+                    corp = item['corp_name']; market = item.get('corp_cls', '기타'); mode = self.monitor_mode.get()
+                    if mode == "KOSPI" and market != "Y": continue
+                    elif mode == "KOSDAQ" and market != "K": continue
+                    elif mode == "selected" and corp not in self.saved_corps: continue
+                    f_code = self.classify_report(title, item.get('pblntf_ty', 'E'))
+                    info = PBLNTF_CONFIG[f_code]
+                    data_obj = {'no': rid[-6:], 'lt': datetime.now().strftime('%H:%M:%S'), 'y': info['name'], 'c': corp, 'r': title, 'u': DART_VIEW_URL+rid, 't': f"TAG_{f_code}"}
+                    self.all_captured_data.append(data_obj) # 원본 데이터 저장
+                    self.update_queue.put(data_obj)
+                    self.processed_ids.add(rid)
+        except: pass
 
     def run_loop(self):
+        if self.time_mode.get() == "now":
+            try:
+                res = requests.get("https://opendart.fss.or.kr/api/list.json", params={'crtfc_key': API_KEY, 'bgn_de': self.date_entry.get().strip(), 'page_count': '100', 'sort_mth': 'desc'}, verify=ssl_verify).json()
+                if res.get('status') == '000':
+                    for item in res.get('list', []): self.processed_ids.add(item['rcept_no'])
+            except: pass
         while self.is_running:
             self.check_dart()
             try: itv = int(self.interval_entry.get())
@@ -202,36 +250,38 @@ class DartMonitorApp:
                 if not self.is_running: return
                 time.sleep(1)
 
-    def check_dart(self):
-        url = "https://opendart.fss.or.kr/api/list.json"
-        params = {'crtfc_key': API_KEY, 'bgn_de': datetime.now().strftime('%Y%m%d'), 'page_count': '100', 'sort_mth': 'desc'}
-        try:
-            res = requests.get(url, params=params, verify=ssl_verify).json()
-            if res.get('status') == '000':
-                for item in res.get('list', []):
-                    rid = item['rcept_no']
-                    if rid in self.processed_ids or rid[:14] < self.start_time: continue
-                    
-                    title = item['report_nm']
-                    # 필터링
-                    if any(x in title for x in self.exclude_keywords): continue
-                    if self.include_keywords and not any(x in title for x in self.include_keywords): continue
+    def process_queue(self):
+        while not self.update_queue.empty():
+            d = self.update_queue.get_nowait()
+            # 검색어가 없을 때만 트리에 실시간 추가 (검색 중일 때는 방해 금지)
+            if not self.list_filter_var.get().strip():
+                self.tree.insert("", 0, values=(d['no'], d['lt'], d['y'], d['c'], d['r']), tags=(d['u'], d['t']))
+        self.root.after(500, self.process_queue)
 
-                    corp = item['corp_name']
-                    if self.monitor_mode.get() == "all":
-                        if corp not in self.all_market_corps: continue
-                    else:
-                        if not (self.corp_vars.get(corp) and self.corp_vars[corp].get()): continue
+    def on_double_click(self, e):
+        sel = self.tree.selection()
+        if sel: webbrowser.open(self.tree.item(sel[0], "tags")[0])
 
-                    self.update_queue.put({
-                        't': datetime.now().strftime('%H:%M:%S'),
-                        'y': PBLNTF_TY_MAP.get(item.get('pblntf_ty'), '기타'),
-                        'c': corp, 'r': title, 'u': DART_VIEW_URL + rid
-                    })
-                    self.processed_ids.add(rid)
-        except: pass
+    def add_keyword(self, attr):
+        ent = getattr(self, f"{attr}_ent"); lb = getattr(self, f"{attr}_lb"); k_list = self.include_keywords if attr=="inc" else self.exclude_keywords
+        k = ent.get().strip()
+        if k and k not in k_list: k_list.append(k); lb.insert(tk.END, k); self.save_data(f"{attr}_keywords.txt", k_list)
+        ent.delete(0, tk.END)
+
+    def del_keyword(self, attr):
+        lb = getattr(self, f"{attr}_lb"); k_list = self.include_keywords if attr=="inc" else self.exclude_keywords
+        sel = lb.curselection()
+        if sel: k = lb.get(sel[0]); k_list.remove(k); lb.delete(sel[0]); self.save_data(f"{attr}_keywords.txt", k_list)
+
+    def full_reset(self):
+        for i in self.tree.get_children(): self.tree.delete(i)
+        self.processed_ids.clear()
+        self.all_captured_data.clear()
+
+    def classify_report(self, title, original_type):
+        for code, keywords in KEYWORD_TYPE_RULES.items():
+            if any(k in title for k in keywords): return code
+        return original_type if original_type in PBLNTF_CONFIG else 'E'
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DartMonitorApp(root)
-    root.mainloop()
+    root = tk.Tk(); app = DartMonitorApp(root); root.mainloop()
