@@ -12,14 +12,14 @@ import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
-from plyer import notification
 
+# 보안 및 경고 무시
 warnings.filterwarnings(action='ignore')
 ssl_verify = False
 API_KEY = '88334205f08b12dbc563a46758a3534a1778f471'
 DART_VIEW_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
 
-# 로컬 저장 파일명
+# 로컬 저장 파일
 EXCLUDE_FILE = "exclude_keywords.txt"
 INCLUDE_FILE = "include_keywords.txt"
 
@@ -32,14 +32,13 @@ PBLNTF_TY_MAP = {
 class DartMonitorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("DART 실시간 모니터 v3.6 (키워드 필터 강화)")
-        self.root.geometry("1200x800")
+        self.root.title("DART 실시간 모니터 v3.8 (시스템 안정화 버전)")
+        self.root.geometry("1200x850")
         
         self.processed_ids = set()
         self.is_running = False
         self.update_queue = queue.Queue()
         
-        # 키워드 로드
         self.exclude_keywords = self.load_keywords(EXCLUDE_FILE)
         self.include_keywords = self.load_keywords(INCLUDE_FILE)
         self.all_market_corps = self.get_all_market_corps()
@@ -49,8 +48,10 @@ class DartMonitorApp:
 
     def load_keywords(self, filename):
         if os.path.exists(filename):
-            with open(filename, 'r', encoding='utf-8') as f:
-                return [line.strip() for line in f.readlines() if line.strip()]
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    return [line.strip() for line in f.readlines() if line.strip()]
+            except: return []
         return []
 
     def save_keywords(self, filename, kws):
@@ -68,7 +69,7 @@ class DartMonitorApp:
         except: return set()
 
     def setup_ui(self):
-        # 상단 설정창
+        # 상단 설정 바
         top = tk.Frame(self.root, pady=10)
         top.pack(fill="x")
         tk.Label(top, text="조회 주기(초): ").pack(side="left", padx=5)
@@ -80,12 +81,12 @@ class DartMonitorApp:
         tk.Radiobutton(top, text="전체 상장사", variable=self.monitor_mode, value="all").pack(side="left", padx=10)
         tk.Radiobutton(top, text="관심 종목", variable=self.monitor_mode, value="selected").pack(side="left", padx=10)
 
-        # 메인 레이아웃
+        # 메인 레이아웃 (3분할)
         paned = tk.PanedWindow(self.root, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10, pady=5)
 
         # 1. 좌측: 관심 종목
-        left = tk.LabelFrame(paned, text="관심 종목")
+        left = tk.LabelFrame(paned, text="관심 종목 (체크)")
         paned.add(left, width=150)
         self.corp_vars = {}
         for c in ['삼성전자', 'SK하이닉스', '현대차', 'NAVER', '카카오']:
@@ -93,44 +94,56 @@ class DartMonitorApp:
             tk.Checkbutton(left, text=c, variable=v).pack(anchor="w")
             self.corp_vars[c] = v
 
-        # 2. 중앙: 리스트
-        center = tk.LabelFrame(paned, text="공시 목록 (더블클릭 시 열기)")
-        paned.add(center, width=600)
+        # 2. 중앙: 공시 메인 리스트
+        center = tk.LabelFrame(paned, text="포착된 공시 목록 (더블클릭 시 상세 페이지 열기)")
+        paned.add(center, width=650)
         self.tree = ttk.Treeview(center, columns=("t","y","c","r"), show='headings')
-        for col, head in zip(("t","y","c","r"), ("시간","유형","종목","제목")):
+        for col, head in zip(("t","y","c","r"), ("시간","유형","종목","공시제목")):
             self.tree.heading(col, text=head)
-        self.tree.column("t", width=70); self.tree.column("y", width=90); self.tree.column("c", width=100)
+        self.tree.column("t", width=70, anchor="center")
+        self.tree.column("y", width=90, anchor="center")
+        self.tree.column("c", width=120)
         self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<Double-1>", lambda e: webbrowser.open(self.tree.item(self.tree.selection()[0], "tags")[0]))
+        self.tree.bind("<Double-1>", self.open_link)
 
-        # 3. 우측: 키워드 필터
-        right = tk.Frame(paned)
-        paned.add(right, width=250)
+        # 3. 우측: 키워드 관리 및 실시간 상태 로그
+        right_frame = tk.Frame(paned)
+        paned.add(right_frame, width=300)
 
-        # 포함 키워드 UI
-        inc_f = tk.LabelFrame(right, text="포함 키워드 (있을 때만 표시)")
-        inc_f.pack(fill="both", expand=True, pady=2)
-        self.inc_ent = tk.Entry(inc_f)
-        self.inc_ent.pack(fill="x"); self.inc_ent.bind("<Return>", self.add_inc)
-        self.inc_lb = tk.Listbox(inc_f, height=8)
-        self.inc_lb.pack(fill="both", expand=True); self.inc_lb.bind("<Delete>", self.del_inc)
+        # 키워드 UI
+        kf = tk.LabelFrame(right_frame, text="키워드 필터")
+        kf.pack(fill="x", pady=2)
+        
+        tk.Label(kf, text="[포함] (비워두면 전체)").pack(anchor="w", padx=5)
+        self.inc_ent = tk.Entry(kf); self.inc_ent.pack(fill="x", padx=5); self.inc_ent.bind("<Return>", self.add_inc)
+        self.inc_lb = tk.Listbox(kf, height=5); self.inc_lb.pack(fill="x", padx=5); self.inc_lb.bind("<Delete>", self.del_inc)
+        
+        tk.Label(kf, text="[제외]").pack(anchor="w", padx=5, pady=(5,0))
+        self.exc_ent = tk.Entry(kf); self.exc_ent.pack(fill="x", padx=5); self.exc_ent.bind("<Return>", self.add_exc)
+        self.exc_lb = tk.Listbox(kf, height=5); self.exc_lb.pack(fill="x", padx=5); self.exc_lb.bind("<Delete>", self.del_exc)
+        
         for k in self.include_keywords: self.inc_lb.insert(tk.END, k)
-
-        # 제외 키워드 UI
-        exc_f = tk.LabelFrame(right, text="제외 키워드 (무조건 차단)")
-        exc_f.pack(fill="both", expand=True, pady=2)
-        self.exc_ent = tk.Entry(exc_f)
-        self.exc_ent.pack(fill="x"); self.exc_ent.bind("<Return>", self.add_exc)
-        self.exc_lb = tk.Listbox(exc_f, height=8)
-        self.exc_lb.pack(fill="both", expand=True); self.exc_lb.bind("<Delete>", self.del_exc)
         for k in self.exclude_keywords: self.exc_lb.insert(tk.END, k)
 
-        # 하단 제어
+        # 하단 로그 메시지창 (알림 대용)
+        self.log_text = tk.Text(right_frame, bg="#f0f0f0", font=("맑은 고딕", 9), state="disabled")
+        self.log_text.pack(fill="both", expand=True, pady=5)
+
+        # 시작/중지 버튼
         self.btn_txt = tk.StringVar(value="모니터링 시작")
         self.start_btn = tk.Button(self.root, textvariable=self.btn_txt, command=self.toggle, bg="#2ecc71", fg="white", font=('',12,'bold'), height=2)
         self.start_btn.pack(fill="x", padx=10, pady=5)
-        self.status = tk.Label(self.root, text="대기 중", fg="gray")
+        self.status = tk.Label(self.root, text="상태: 대기 중", fg="gray")
         self.status.pack()
+
+    def add_log(self, msg):
+        self.log_text.config(state="normal")
+        self.log_text.insert("1.0", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+        self.log_text.config(state="disabled")
+
+    def open_link(self, e):
+        sel = self.tree.selection()
+        if sel: webbrowser.open(self.tree.item(sel[0], "tags")[0])
 
     def add_inc(self, e):
         k = self.inc_ent.get().strip()
@@ -157,15 +170,14 @@ class DartMonitorApp:
             self.exc_lb.delete(s[0]); self.save_keywords(EXCLUDE_FILE, self.exclude_keywords)
 
     def process_queue(self):
-        """메인 루프에서만 UI 업데이트와 알림창 호출 (에러 방지 핵심)"""
+        """메인 스레드 전용 UI 업데이트 (에러 방지)"""
         try:
-            while True:
+            while not self.update_queue.empty():
                 d = self.update_queue.get_nowait()
                 self.tree.insert("", 0, values=(d['t'], d['y'], d['c'], d['r']), tags=(d['u'],))
-                # 알림창 호출을 메인스레드인 여기서만 수행
-                notification.notify(title=f"DART [{d['c']}]", message=d['r'], timeout=5)
-        except queue.Empty: pass
-        self.root.after(200, self.process_queue)
+                self.add_log(f"포착: {d['c']} - {d['r'][:15]}...")
+        except: pass
+        self.root.after(500, self.process_queue)
 
     def toggle(self):
         if not self.is_running:
@@ -173,21 +185,24 @@ class DartMonitorApp:
             self.is_running = True
             self.btn_txt.set("모니터링 중지")
             self.start_btn.config(bg="#e74c3c")
+            self.status.config(text="조회 실행 중...", fg="blue")
             threading.Thread(target=self.run_loop, daemon=True).start()
         else:
             self.is_running = False
             self.btn_txt.set("모니터링 시작")
             self.start_btn.config(bg="#2ecc71")
+            self.status.config(text="중지됨", fg="red")
 
     def run_loop(self):
         while self.is_running:
-            self.check()
-            itv = int(self.interval_entry.get())
+            self.check_dart()
+            try: itv = int(self.interval_entry.get())
+            except: itv = 60
             for _ in range(itv):
                 if not self.is_running: return
                 time.sleep(1)
 
-    def check(self):
+    def check_dart(self):
         url = "https://opendart.fss.or.kr/api/list.json"
         params = {'crtfc_key': API_KEY, 'bgn_de': datetime.now().strftime('%Y%m%d'), 'page_count': '100', 'sort_mth': 'desc'}
         try:
@@ -198,14 +213,10 @@ class DartMonitorApp:
                     if rid in self.processed_ids or rid[:14] < self.start_time: continue
                     
                     title = item['report_nm']
-                    # 1. 제외 키워드 필터 (무조건 제외)
+                    # 필터링
                     if any(x in title for x in self.exclude_keywords): continue
-                    
-                    # 2. 포함 키워드 필터 (있을 때만 작동)
-                    if self.include_keywords:
-                        if not any(x in title for x in self.include_keywords): continue
+                    if self.include_keywords and not any(x in title for x in self.include_keywords): continue
 
-                    # 3. 모드 필터
                     corp = item['corp_name']
                     if self.monitor_mode.get() == "all":
                         if corp not in self.all_market_corps: continue
